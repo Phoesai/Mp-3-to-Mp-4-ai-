@@ -1,0 +1,6 @@
+{
+  "name": "AI Music Video Creator",
+  "description": "Create customized music videos from MP3 files with audio visualizers, animated cover art, metadata editing, and custom text branding.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
