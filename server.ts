@@ -61,6 +61,35 @@ interface SessionData {
 }
 
 const sessions = new Map<string, SessionData>();
+const activeRenderJobs = new Set<string>();
+
+function isFileProtected(filePath: string): boolean {
+  const normPath = filePath.replace(/\\/g, '/');
+
+  for (const activeSessionId of activeRenderJobs) {
+    if (normPath.includes(activeSessionId)) {
+      return true;
+    }
+  }
+
+  for (const [sessionId, session] of sessions.entries()) {
+    const isSessionActive = activeRenderJobs.has(sessionId) || (
+      session.status &&
+      session.status.stage !== 'complete' &&
+      session.status.stage !== 'error' &&
+      session.status.stage !== 'idle'
+    );
+
+    if (isSessionActive) {
+      if (normPath.includes(sessionId)) return true;
+      if (session.audioPath && path.resolve(session.audioPath) === path.resolve(filePath)) return true;
+      if (session.coverPath && path.resolve(session.coverPath) === path.resolve(filePath)) return true;
+      if (session.outputPath && path.resolve(session.outputPath) === path.resolve(filePath)) return true;
+    }
+  }
+
+  return false;
+}
 
 async function startServer() {
   const app = express();
@@ -85,7 +114,7 @@ async function startServer() {
       const sessionId = path.basename(filePath, path.extname(filePath)).replace('audio_', '');
 
       // Extract ID3 tags using music-metadata service
-      const metadata = await extractMetadata(filePath);
+      const metadata = await extractMetadata(filePath, req.file.originalname);
 
       let coverPath: string | null = null;
       if (metadata.hasCoverArt && metadata.coverArtDataUrl) {
@@ -190,6 +219,8 @@ async function startServer() {
       });
 
       // Execute background video render
+      activeRenderJobs.add(sessionId);
+
       renderMusicVideo(
         sessionId,
         session.audioPath,
@@ -210,6 +241,8 @@ async function startServer() {
         session.status.message = `Rendering failed: ${err.message}`;
         session.status.error = err.message;
         session.status.logs.push(`ERROR: ${err.message}`);
+      }).finally(() => {
+        activeRenderJobs.delete(sessionId);
       });
 
     } catch (err: any) {
@@ -285,7 +318,7 @@ async function startServer() {
   });
 
   // Periodic Cleanup Task (Cleans files older than 1 hour, runs every 15 mins)
-  startFileCleanupScheduler(TEMP_DIR, 15 * 60 * 1000, 60 * 60 * 1000);
+  startFileCleanupScheduler(TEMP_DIR, 15 * 60 * 1000, 60 * 60 * 1000, isFileProtected);
 
   // Vite middleware or static serving
   if (process.env.NODE_ENV !== 'production') {

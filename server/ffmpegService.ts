@@ -30,6 +30,149 @@ function toFfmpegColor(hex: string): string {
 }
 
 /**
+ * Spawns an external command (ffmpeg/ffprobe) and streams stdout/stderr line by line
+ */
+export function runCommand(cmd: string, args: string[], onLog: (line: string) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cmdStr = `${cmd} ${args.map(a => (a.includes(' ') || a.includes(':') || a.includes(';') ? `"${a}"` : a)).join(' ')}`;
+    onLog(`[CMD] ${cmdStr}`);
+
+    const proc = spawn(cmd, args);
+    let stderrBuffer = '';
+    const recentStderrLines: string[] = [];
+
+    const processChunk = (data: Buffer) => {
+      stderrBuffer += data.toString();
+      const lines = stderrBuffer.split(/\r?\n/);
+      // Keep incomplete trailing line in buffer
+      stderrBuffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.trim().length > 0) {
+          recentStderrLines.push(line);
+          if (recentStderrLines.length > 50) {
+            recentStderrLines.shift();
+          }
+          onLog(line);
+        }
+      }
+    };
+
+    proc.stderr.on('data', processChunk);
+    proc.stdout.on('data', processChunk);
+
+    proc.on('close', (code) => {
+      if (stderrBuffer.trim().length > 0) {
+        const finalLine = stderrBuffer.trim();
+        recentStderrLines.push(finalLine);
+        onLog(finalLine);
+        stderrBuffer = '';
+      }
+
+      if (code === 0) {
+        resolve();
+      } else {
+        const errDetail = recentStderrLines.slice(-15).join('\n') || 'No stderr output captured';
+        reject(new Error(`${cmd} process failed with exit code ${code}:\n${errDetail}`));
+      }
+    });
+
+    proc.on('error', (err) => {
+      reject(new Error(`Failed to start ${cmd} process: ${err.message}`));
+    });
+  });
+}
+
+/**
+ * Convenience wrapper for running FFmpeg commands
+ */
+export function runFfmpegCommand(args: string[], onLog: (line: string) => void): Promise<void> {
+  return runCommand('ffmpeg', args, onLog);
+}
+
+/**
+ * Robust duration probe: tries ffprobe first, then falls back to decoding with ffmpeg
+ */
+export async function probeAudioDuration(audioPath: string, onLog: (line: string) => void): Promise<number> {
+  const absPath = path.resolve(audioPath);
+  onLog(`[PROBE] Probing audio duration for: ${absPath}`);
+
+  // METHOD 1: ffprobe
+  const ffprobeArgs = [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    absPath
+  ];
+
+  try {
+    let rawStdout = '';
+    await new Promise<void>((resolve, reject) => {
+      const cmdStr = `ffprobe ${ffprobeArgs.join(' ')}`;
+      onLog(`[CMD] ${cmdStr}`);
+
+      const proc = spawn('ffprobe', ffprobeArgs);
+      proc.stdout.on('data', d => { rawStdout += d.toString(); });
+      proc.stderr.on('data', d => {
+        const str = d.toString();
+        str.split(/\r?\n/).forEach(l => { if (l.trim()) onLog(`[ffprobe stderr] ${l.trim()}`); });
+      });
+      proc.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(`ffprobe exited with code ${code}`));
+      });
+      proc.on('error', err => reject(err));
+    });
+
+    const durationStr = rawStdout.trim();
+    onLog(`[PROBE STDOUT] ffprobe output: "${durationStr}"`);
+    const parsedDuration = parseFloat(durationStr);
+
+    if (!isNaN(parsedDuration) && parsedDuration > 0) {
+      onLog(`[PROBE SUCCESS] Audio duration detected via ffprobe: ${parsedDuration.toFixed(2)} seconds`);
+      return parsedDuration;
+    } else {
+      onLog(`[PROBE NOTICE] ffprobe returned non-positive value ("${durationStr}"), attempting ffmpeg decode fallback...`);
+    }
+  } catch (err: any) {
+    onLog(`[PROBE WARNING] ffprobe failed: ${err.message}. Attempting ffmpeg decode fallback...`);
+  }
+
+  // METHOD 2: Fallback decoding ffmpeg -i <file> -f null -
+  onLog(`[PROBE FALLBACK] Decoding audio stream with ffmpeg to parse exact duration...`);
+  const fallbackArgs = ['-i', absPath, '-f', 'null', '-'];
+
+  let maxTimeSeconds = 0;
+  try {
+    await runFfmpegCommand(fallbackArgs, (line) => {
+      onLog(line);
+      const timeMatch = line.match(/time=(\d+):(\d+):(\d+\.\d+)/) || line.match(/time=(\d+\.\d+)/);
+      if (timeMatch) {
+        if (timeMatch.length === 4) {
+          const hrs = parseFloat(timeMatch[1]);
+          const mins = parseFloat(timeMatch[2]);
+          const secs = parseFloat(timeMatch[3]);
+          const totalSecs = hrs * 3600 + mins * 60 + secs;
+          if (totalSecs > maxTimeSeconds) maxTimeSeconds = totalSecs;
+        } else if (timeMatch.length === 2) {
+          const totalSecs = parseFloat(timeMatch[1]);
+          if (totalSecs > maxTimeSeconds) maxTimeSeconds = totalSecs;
+        }
+      }
+    });
+
+    if (maxTimeSeconds > 0) {
+      onLog(`[PROBE SUCCESS] Audio duration detected via ffmpeg decode fallback: ${maxTimeSeconds.toFixed(2)} seconds`);
+      return maxTimeSeconds;
+    }
+  } catch (err: any) {
+    onLog(`[PROBE ERROR] Fallback ffmpeg decode failed: ${err.message}`);
+  }
+
+  return 0;
+}
+
+/**
  * Generates an MP4 video from audio and user settings using FFmpeg
  */
 export async function renderMusicVideo(
@@ -41,11 +184,55 @@ export async function renderMusicVideo(
   outputVideoPath: string,
   updateStatus: (statusPartial: Partial<GenerationStatus>) => void
 ): Promise<string> {
+  // 1. VALIDATE INPUT FILE
+  const absAudioPath = path.resolve(audioPath);
+  updateStatus({
+    stage: 'analyzing',
+    progress: 5,
+    message: 'Validating input audio file & path...',
+    logs: ['Initializing rendering pipeline', `Resolving audio file path: ${absAudioPath}`],
+  });
+
+  if (!fs.existsSync(absAudioPath)) {
+    const errMsg = `Uploaded audio file does not exist at path: ${absAudioPath}`;
+    updateStatus({ stage: 'error', message: errMsg, logs: [`ERROR: ${errMsg}`] });
+    throw new Error(errMsg);
+  }
+
+  const audioStat = await fs.promises.stat(absAudioPath);
+  updateStatus({
+    logs: [`Validated audio file exists - Byte size: ${audioStat.size} bytes (${(audioStat.size / (1024 * 1024)).toFixed(2)} MB)`],
+  });
+
+  if (audioStat.size === 0) {
+    const errMsg = `Uploaded audio file is empty (0 bytes) at path: ${absAudioPath}`;
+    updateStatus({ stage: 'error', message: errMsg, logs: [`ERROR: ${errMsg}`] });
+    throw new Error(errMsg);
+  }
+
+  // 2. DURATION PROBE & FAIL FAST GUARD
+  updateStatus({
+    stage: 'analyzing',
+    progress: 10,
+    message: 'Probing audio duration with ffprobe & ffmpeg fallback...',
+  });
+
+  const verifiedDuration = await probeAudioDuration(absAudioPath, (line) => {
+    updateStatus({ logs: [line] });
+  });
+
+  if (verifiedDuration <= 0) {
+    const failMsg = 'Could not read audio duration - the uploaded file may be empty or corrupt';
+    updateStatus({ stage: 'error', message: failMsg, logs: [`ERROR: ${failMsg}`] });
+    throw new Error(failMsg);
+  }
+
+  const mainDuration = verifiedDuration;
   updateStatus({
     stage: 'preparing_visuals',
-    progress: 10,
+    progress: 15,
     message: 'Preparing graphic elements & visual layout...',
-    logs: ['Initializing rendering pipeline', `Audio duration: ${audioDuration} seconds`],
+    logs: [`Verified audio duration: ${mainDuration.toFixed(2)} seconds`],
   });
 
   const tempDir = path.dirname(outputVideoPath);
@@ -72,7 +259,7 @@ export async function renderMusicVideo(
   const visColor = settings.visualizerColor || '#00f2fe';
   const visFfmpegColor = toFfmpegColor(visColor);
 
-  // 1. STEP ONE: Render Intro Slate if enabled
+  // 3. STEP ONE: Render Intro Slate if enabled
   if (settings.addIntro) {
     updateStatus({
       stage: 'rendering_intro',
@@ -109,11 +296,11 @@ export async function renderMusicVideo(
     ];
 
     await runFfmpegCommand(introArgs, (line) => {
-      // Progress parsing
+      updateStatus({ logs: [line] });
     });
   }
 
-  // 2. STEP TWO: Render Main Video with Audio
+  // 4. STEP TWO: Render Main Video with Audio
   updateStatus({
     stage: 'encoding_main',
     progress: 40,
@@ -121,7 +308,6 @@ export async function renderMusicVideo(
     logs: [`Generating video style: ${settings.style}`],
   });
 
-  const mainDuration = audioDuration > 0 ? audioDuration : 10;
   let mainFfmpegArgs: string[] = [];
 
   // Determine Main Video Filter Graph based on selected style
@@ -150,7 +336,7 @@ export async function renderMusicVideo(
     mainFfmpegArgs = [
       '-y',
       '-f', 'lavfi', '-i', `color=c=${bgColor}:s=${width}x${height}:d=${mainDuration}`,
-      '-i', audioPath,
+      '-i', absAudioPath,
       '-filter_complex', filterGraph,
       '-map', '[main_out]',
       '-map', '1:a',
@@ -180,7 +366,7 @@ export async function renderMusicVideo(
     mainFfmpegArgs = [
       '-y',
       '-loop', '1', '-i', coverImagePath,
-      '-i', audioPath,
+      '-i', absAudioPath,
       '-filter_complex', filterGraph,
       '-map', '[main_out]',
       '-map', '1:a',
@@ -204,7 +390,7 @@ export async function renderMusicVideo(
     mainFfmpegArgs = [
       '-y',
       '-f', 'lavfi', '-i', `color=c=${bgColor}:s=${width}x${height}:d=${mainDuration}`,
-      '-i', audioPath,
+      '-i', absAudioPath,
       '-filter_complex', filterGraph,
       '-map', '[main_out]',
       '-map', '1:a',
@@ -226,11 +412,13 @@ export async function renderMusicVideo(
       const secs = parseFloat(timeMatch[3]);
       const currentSecs = hours * 3600 + mins * 60 + secs;
       const pct = Math.min(90, Math.floor(40 + (currentSecs / mainDuration) * 50));
-      updateStatus({ progress: pct, message: `Encoding video: ${pct}% complete...` });
+      updateStatus({ progress: pct, message: `Encoding video: ${pct}% complete...`, logs: [logLine] });
+    } else {
+      updateStatus({ logs: [logLine] });
     }
   });
 
-  // 3. STEP THREE: Concatenate Intro + Main Video if intro is enabled
+  // 5. STEP THREE: Concatenate Intro + Main Video if intro is enabled
   if (settings.addIntro && fs.existsSync(introVideoTempPath)) {
     updateStatus({
       stage: 'stitching',
@@ -252,7 +440,9 @@ export async function renderMusicVideo(
       outputVideoPath
     ];
 
-    await runFfmpegCommand(concatArgs, () => {});
+    await runFfmpegCommand(concatArgs, (line) => {
+      updateStatus({ logs: [line] });
+    });
 
     // Clean temp chunk files
     try {
@@ -276,30 +466,4 @@ export async function renderMusicVideo(
   });
 
   return outputVideoPath;
-}
-
-/**
- * Spawns FFmpeg process and handles output/error logs
- */
-function runFfmpegCommand(args: string[], onLog: (line: string) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ffmpegProcess = spawn('ffmpeg', args);
-
-    ffmpegProcess.stderr.on('data', (data) => {
-      const log = data.toString();
-      onLog(log);
-    });
-
-    ffmpegProcess.on('close', (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg process failed with exit code ${code}`));
-      }
-    });
-
-    ffmpegProcess.on('error', (err) => {
-      reject(err);
-    });
-  });
 }

@@ -13,6 +13,13 @@ export default function App() {
   const [metadata, setMetadata] = useState<AudioMetadata | null>(null);
   const [isLoadingUpload, setIsLoadingUpload] = useState(false);
 
+  // Track user touched fields so manual edits are NEVER overwritten
+  const [userTouched, setUserTouched] = useState({
+    title: false,
+    artist: false,
+    album: false,
+  });
+
   const [settings, setSettings] = useState<VideoSettings>({
     style: 'visualizer',
     artStyle: 'cinematic',
@@ -63,17 +70,24 @@ export default function App() {
     };
   }, [isGenerating, sessionId]);
 
-  const handleAudioUploaded = (data: { sessionId: string; metadata: AudioMetadata }) => {
-    setSessionId(data.sessionId);
+  const handleFieldTouched = (field: 'title' | 'artist' | 'album') => {
+    setUserTouched((prev) => ({ ...prev, [field]: true }));
+  };
+
+  const handleAudioUploaded = (data: { sessionId: string; metadata: AudioMetadata; isPending?: boolean }) => {
+    if (data.sessionId) {
+      setSessionId(data.sessionId);
+    }
     setMetadata(data.metadata);
 
-    // Pre-fill settings with extracted metadata
+    // Pre-fill settings with extracted metadata, respecting userTouched flags
     setSettings((prev) => ({
       ...prev,
-      title: data.metadata.title || 'Untitled Track',
-      artist: data.metadata.artist || 'Unknown Artist',
-      album: data.metadata.album || '',
-      coverArtDataUrl: data.metadata.coverArtDataUrl,
+      title: userTouched.title ? prev.title : (data.metadata.title || 'Untitled Track'),
+      artist: userTouched.artist ? prev.artist : (data.metadata.artist || 'Unknown Artist'),
+      album: userTouched.album ? prev.album : (data.metadata.album || ''),
+      coverArtDataUrl: data.metadata.coverArtDataUrl || prev.coverArtDataUrl,
+      useAiCover: data.metadata.coverArtDataUrl ? false : prev.useAiCover,
     }));
   };
 
@@ -114,6 +128,7 @@ export default function App() {
     setMetadata(null);
     setIsGenerating(false);
     setGenerationStatus(null);
+    setUserTouched({ title: false, artist: false, album: false });
   };
 
   return (
@@ -141,14 +156,15 @@ export default function App() {
           isLoading={isLoadingUpload}
         />
 
-        {/* STEP 2 & 3: Metadata Editor & Video Settings (Only shown after audio is uploaded) */}
-        {metadata && sessionId && !generationStatus && (
+        {/* STEP 2 & 3: Metadata Editor & Video Settings (Shown when metadata is available) */}
+        {metadata && !generationStatus && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
             <MetadataEditor
               metadata={metadata}
-              sessionId={sessionId}
+              sessionId={sessionId || ''}
               settings={settings}
               onSettingsChange={setSettings}
+              onFieldTouched={handleFieldTouched}
             />
 
             <VideoStyleSelector
@@ -170,7 +186,8 @@ export default function App() {
 
               <button
                 onClick={handleStartGeneration}
-                className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-gradient-to-r from-cyan-500 via-indigo-500 to-purple-600 hover:from-cyan-400 hover:via-indigo-400 hover:to-purple-500 text-white font-bold text-sm shadow-xl shadow-cyan-500/25 transition-all flex items-center justify-center space-x-2"
+                disabled={!sessionId}
+                className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-gradient-to-r from-cyan-500 via-indigo-500 to-purple-600 hover:from-cyan-400 hover:via-indigo-400 hover:to-purple-500 text-white font-bold text-sm shadow-xl shadow-cyan-500/25 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
               >
                 <Video className="w-4 h-4" />
                 <span>Render Copyright-Safe Video</span>

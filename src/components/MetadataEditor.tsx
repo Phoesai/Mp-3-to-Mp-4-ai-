@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import { Tag, Sparkles, Image, RefreshCw, Wand2, ArrowLeftRight, Check, Upload, Film, Wand, Eye, Sunset, Zap, Layers } from 'lucide-react';
 import { AudioMetadata, VideoSettings, ArtStyle } from '../types';
+import { cleanFilename } from '../utils/metadataParser';
 
 interface MetadataEditorProps {
   metadata: AudioMetadata;
   sessionId: string;
   settings: VideoSettings;
   onSettingsChange: (newSettings: VideoSettings) => void;
+  onFieldTouched?: (field: 'title' | 'artist' | 'album') => void;
 }
 
 export const MetadataEditor: React.FC<MetadataEditorProps> = ({
@@ -14,12 +16,16 @@ export const MetadataEditor: React.FC<MetadataEditorProps> = ({
   sessionId,
   settings,
   onSettingsChange,
+  onFieldTouched,
 }) => {
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [coverSuccessMsg, setCoverSuccessMsg] = useState<string | null>(null);
 
   const handleTextChange = (field: keyof VideoSettings, value: any) => {
+    if (field === 'title' || field === 'artist' || field === 'album') {
+      onFieldTouched?.(field);
+    }
     onSettingsChange({
       ...settings,
       [field]: value,
@@ -36,23 +42,20 @@ export const MetadataEditor: React.FC<MetadataEditorProps> = ({
   ];
 
   const handleCleanMetadata = () => {
-    let cleanTitle = settings.title
-      .replace(/\.(mp3|wav|m4a|flac)$/i, '')
-      .replace(/\[.*?(official|audio|video|lyrics|hd|4k).*?\]/gi, '')
-      .replace(/\(.*?(official|audio|video|lyrics|320kbps).*?\)/gi, '')
-      .replace(/^\d+[-_.\s]*/, '')
-      .trim();
-
-    let cleanArtist = settings.artist.trim();
+    const cleaned = cleanFilename(settings.title);
+    const newTitle = cleaned.title || settings.title;
+    const newArtist = cleaned.artist || settings.artist;
 
     onSettingsChange({
       ...settings,
-      title: cleanTitle || 'Untitled Track',
-      artist: cleanArtist || 'Unknown Artist',
+      title: newTitle || 'Untitled Track',
+      artist: newArtist || 'Unknown Artist',
     });
   };
 
   const handleSwapTitleArtist = () => {
+    onFieldTouched?.('title');
+    onFieldTouched?.('artist');
     onSettingsChange({
       ...settings,
       title: settings.artist,

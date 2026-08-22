@@ -4,11 +4,13 @@ import path from 'path';
 /**
  * Periodically cleans up temporary files (uploads, outputs, covers) older than maxAgeMs.
  * Designed for Cloud Run / ephemeral environments to keep disk usage under limits.
+ * Skips any file that is protected or belongs to an active in-progress job.
  */
 export function startFileCleanupScheduler(
   tempDir: string,
   intervalMs: number = 15 * 60 * 1000, // Run every 15 minutes
-  maxAgeMs: number = 60 * 60 * 1000   // Delete files older than 1 hour
+  maxAgeMs: number = 60 * 60 * 1000,   // Delete files older than 1 hour
+  isProtected?: (filePath: string) => boolean
 ): NodeJS.Timeout {
   console.log(`[File Cleanup] Initializing scheduler for ${tempDir} (Interval: ${intervalMs / 1000}s, MaxAge: ${maxAgeMs / 1000}s)`);
 
@@ -29,6 +31,12 @@ export function startFileCleanupScheduler(
           if (stat.isDirectory()) {
             cleanDirectory(filePath);
           } else {
+            // Cleanup Guard: check if file belongs to an active in-progress render job
+            if (isProtected && isProtected(filePath)) {
+              console.log(`[File Cleanup Guard] Skipping active/protected job file: ${filePath}`);
+              continue;
+            }
+
             const ageMs = now - stat.mtimeMs;
             if (ageMs > maxAgeMs) {
               freedBytes += stat.size;

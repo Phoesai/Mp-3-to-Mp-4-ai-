@@ -7,10 +7,11 @@ from pathlib import Path
 logger = logging.getLogger("file_cleanup")
 logging.basicConfig(level=logging.INFO)
 
-def cleanup_stale_files(temp_dir: str, max_age_seconds: int = 3600):
+def cleanup_stale_files(temp_dir: str, max_age_seconds: int = 3600, protected_checker=None):
     """
     Deletes files in temp_dir older than max_age_seconds (default 1 hour).
     Prevents disk space exhaustion on ephemeral Cloud Run / container instances.
+    Skips files if protected_checker(file_path) returns True.
     """
     temp_path = Path(temp_dir)
     if not temp_path.exists():
@@ -23,12 +24,16 @@ def cleanup_stale_files(temp_dir: str, max_age_seconds: int = 3600):
     for file_path in temp_path.glob("**/*"):
         if file_path.is_file():
             try:
-              file_age = now - file_path.stat().st_mtime
-              if file_age > max_age_seconds:
-                  file_size = file_path.stat().st_size
-                  file_path.unlink()
-                  deleted_count += 1
-                  freed_bytes += file_size
+                if protected_checker and protected_checker(str(file_path)):
+                    logger.info(f"Skipping active/protected file: {file_path}")
+                    continue
+
+                file_age = now - file_path.stat().st_mtime
+                if file_age > max_age_seconds:
+                    file_size = file_path.stat().st_size
+                    file_path.unlink()
+                    deleted_count += 1
+                    freed_bytes += file_size
             except Exception as e:
                 logger.error(f"Failed to delete {file_path}: {e}")
 

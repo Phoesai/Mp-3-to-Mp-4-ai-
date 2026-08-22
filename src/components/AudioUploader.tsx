@@ -1,9 +1,10 @@
 import React, { useRef, useState } from 'react';
 import { Upload, Music, FileAudio, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { AudioMetadata } from '../types';
+import { extractClientAudioMetadata } from '../utils/metadataParser';
 
 interface AudioUploaderProps {
-  onAudioUploaded: (data: { sessionId: string; metadata: AudioMetadata; file: File }) => void;
+  onAudioUploaded: (data: { sessionId: string; metadata: AudioMetadata; file: File; isPending?: boolean }) => void;
   isLoading: boolean;
 }
 
@@ -11,16 +12,32 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onAudioUploaded, i
   const [isDragging, setIsDragging] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [currentFile, setCurrentFile] = useState<File | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = async (file: File) => {
-    if (!file.name.match(/\.(mp3|wav|m4a|aac|ogg)$/i)) {
-      setUploadError('Please select a valid audio file (MP3, WAV, M4A, AAC, OGG)');
+    if (!file.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i)) {
+      setUploadError('Please select a valid audio file (MP3, WAV, M4A, AAC, OGG, FLAC)');
       return;
     }
 
     setUploadError(null);
     setCurrentFile(file);
+    setIsAnalyzing(true);
+
+    // Rule 5: Run client-side ID3 tag reading & filename cleaning immediately in file onChange handler before/during upload
+    let clientMetadata: AudioMetadata | null = null;
+    try {
+      clientMetadata = await extractClientAudioMetadata(file);
+      onAudioUploaded({
+        sessionId: '',
+        metadata: clientMetadata,
+        file,
+        isPending: true,
+      });
+    } catch (err) {
+      console.error('Client metadata extraction error:', err);
+    }
 
     const formData = new FormData();
     formData.append('audio', file);
@@ -37,13 +54,29 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onAudioUploaded, i
       }
 
       const data = await response.json();
+      
+      // Merge server metadata (e.g. duration, server coverPath) with client metadata
+      const mergedMetadata: AudioMetadata = {
+        title: clientMetadata?.title || data.metadata?.title || 'Untitled Track',
+        artist: clientMetadata?.artist || data.metadata?.artist || 'Unknown Artist',
+        album: clientMetadata?.album || data.metadata?.album || '',
+        duration: data.metadata?.duration || clientMetadata?.duration || 0,
+        genre: data.metadata?.genre || clientMetadata?.genre,
+        hasCoverArt: clientMetadata?.hasCoverArt || data.metadata?.hasCoverArt || false,
+        coverArtDataUrl: clientMetadata?.coverArtDataUrl || data.metadata?.coverArtDataUrl,
+        fileSize: file.size,
+      };
+
       onAudioUploaded({
         sessionId: data.sessionId,
-        metadata: data.metadata,
+        metadata: mergedMetadata,
         file,
+        isPending: false,
       });
     } catch (err: any) {
       setUploadError(err.message || 'Error processing uploaded audio');
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
@@ -92,11 +125,11 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onAudioUploaded, i
           type="file"
           ref={fileInputRef}
           onChange={(e) => e.target.files?.[0] && handleFileChange(e.target.files[0])}
-          accept="audio/mp3,audio/wav,audio/m4a,audio/aac,audio/ogg"
+          accept="audio/mp3,audio/wav,audio/m4a,audio/aac,audio/ogg,audio/flac"
           className="hidden"
         />
 
-        {isLoading ? (
+        {isLoading || isAnalyzing ? (
           <div className="flex flex-col items-center justify-center py-4">
             <Loader2 className="w-10 h-10 text-cyan-400 animate-spin mb-3" />
             <p className="text-sm font-medium text-white">Analyzing Audio & Extracting ID3 Tags...</p>
@@ -120,7 +153,7 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onAudioUploaded, i
             <p className="text-sm font-medium text-white mb-1">
               Drag & Drop your MP3 file here or <span className="text-cyan-400 underline">Browse</span>
             </p>
-            <p className="text-xs text-slate-400">Supports MP3, WAV, M4A up to 50MB</p>
+            <p className="text-xs text-slate-400">Supports MP3, WAV, M4A, FLAC up to 50MB</p>
           </div>
         )}
       </div>
